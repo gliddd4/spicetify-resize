@@ -177,7 +177,34 @@ You'll get one line per swizzle on stderr:
 [nomin] swizzled -[NSWindow setContentMinSize:]
 [nomin] swizzled -[NSWindow minSize]
 [nomin] swizzled -[NSWindow contentMinSize]
+[nomin] hid close button on CefNSWindow
+[nomin] hid miniaturize button on CefNSWindow
+[nomin] hid zoom button on CefNSWindow
 ```
+
+## Hiding the window buttons (traffic lights)
+
+On by default. The library asks each window for its three standard buttons and
+sets `hidden = YES`, so the close/minimise/zoom buttons are never drawn. Useful
+when Spotify is a narrow always-visible panel, where the buttons otherwise sit
+on top of whatever is in the corner.
+
+It has to be done natively — they are `NSWindow` subviews, not DOM, so no theme
+or CSS can touch them. Note that macOS only *dims* them when the window loses
+key status; they are still drawn whenever Spotify is focused.
+
+Keyboard shortcuts still work: `Cmd-W` closes, `Cmd-M` minimises, `Cmd-Q` quits.
+
+To keep them:
+
+```sh
+SPOTIFY_RESIZER_HIDE_TRAFFIC_LIGHTS=0 \
+DYLD_INSERT_LIBRARIES="$HOME/.spotify-resizer/libnomin.dylib" \
+  /Applications/Spotify.app/Contents/MacOS/Spotify
+```
+
+Buttons are re-hidden whenever a window is ordered front or becomes key, because
+AppKit re-shows them on some state changes.
 
 ## Uninstall
 

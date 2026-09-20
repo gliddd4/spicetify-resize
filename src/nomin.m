@@ -34,6 +34,23 @@ static int debug_enabled(void) {
     return cached;
 }
 
+/*
+ * Hide the window buttons ("traffic lights"). Enabled by default; set
+ * SPOTIFY_RESIZER_HIDE_TRAFFIC_LIGHTS=0 to keep them.
+ *
+ * macOS only dims these when the window loses key status, so they are still
+ * drawn over the top-left corner whenever the window is focused - which is
+ * exactly when a full-screen now-playing view is being looked at.
+ */
+static int hide_traffic_lights_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("SPOTIFY_RESIZER_HIDE_TRAFFIC_LIGHTS");
+        cached = (v && *v && *v == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
 static void log_line(const char *fmt, ...) {
     if (!debug_enabled()) return;
     va_list args;
@@ -62,6 +79,29 @@ static void swizzle(Class cls, SEL original, SEL replacement) {
     }
     method_exchangeImplementations(o, r);
     log_line("[nomin] swizzled -[%s %s]", class_getName(cls), sel_getName(original));
+}
+
+/*
+ * Ask the window for each standard button and hide it. -standardWindowButton:
+ * creates the button on first ask, so this is safe to call before the window
+ * has ever been displayed.
+ */
+static void hide_traffic_lights(NSWindow *w) {
+    if (!w || !hide_traffic_lights_enabled()) return;
+
+    static const NSWindowButton kinds[] = {
+        NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton
+    };
+    static const char *names[] = { "close", "miniaturize", "zoom" };
+
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        NSButton *b = [w standardWindowButton:kinds[i]];
+        if (b && !b.isHidden) {
+            b.hidden = YES;
+            log_line("[nomin] hid %s button on %s", names[i],
+                     NSStringFromClass([w class]).UTF8String);
+        }
+    }
 }
 
 @implementation NSWindow (NoMinimumSize)
@@ -93,6 +133,26 @@ static void swizzle(Class cls, SEL original, SEL replacement) {
     return NSMakeSize(0, 0);
 }
 
+/*
+ * Hide on every path that shows a window. The constructor runs before any
+ * window exists, so a single pass at startup is not enough - and AppKit can
+ * re-show the buttons when a window changes state, so this has to repeat.
+ */
+- (void)nomin_makeKeyAndOrderFront:(id)sender {
+    [self nomin_makeKeyAndOrderFront:sender];
+    hide_traffic_lights(self);
+}
+
+- (void)nomin_orderFront:(id)sender {
+    [self nomin_orderFront:sender];
+    hide_traffic_lights(self);
+}
+
+- (void)nomin_orderWindow:(NSWindowOrderingMode)place relativeTo:(NSInteger)otherWin {
+    [self nomin_orderWindow:place relativeTo:otherWin];
+    hide_traffic_lights(self);
+}
+
 @end
 
 __attribute__((constructor))
@@ -110,4 +170,49 @@ static void nomin_init(void) {
     swizzle(win, @selector(setContentMinSize:), @selector(nomin_setContentMinSize:));
     swizzle(win, @selector(minSize),            @selector(nomin_minSize));
     swizzle(win, @selector(contentMinSize),     @selector(nomin_contentMinSize));
+
+    if (!hide_traffic_lights_enabled()) {
+        log_line("[nomin] traffic lights left visible (opted out)");
+        return;
+    }
+
+    swizzle(win, @selector(makeKeyAndOrderFront:),  @selector(nomin_makeKeyAndOrderFront:));
+    swizzle(win, @selector(orderFront:),            @selector(nomin_orderFront:));
+    swizzle(win, @selector(orderWindow:relativeTo:),@selector(nomin_orderWindow:relativeTo:));
+
+    /*
+     * Re-hide when a window becomes key/main/exposed. AppKit re-shows the
+     * buttons on some state changes, and these fire rarely enough that the
+     * repeated work is negligible.
+     */
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    NSArray<NSString *> *events = @[
+        NSWindowDidBecomeKeyNotification,
+        NSWindowDidBecomeMainNotification,
+        NSWindowDidExposeNotification
+    ];
+    for (NSString *name in events) {
+        [nc addObserverForName:name
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
+                        id obj = note.object;
+                        if ([obj isKindOfClass:[NSWindow class]]) {
+                            hide_traffic_lights((NSWindow *)obj);
+                        }
+                    }];
+    }
+
+    /*
+     * The constructor runs before NSApplication finishes launching, so there is
+     * no window yet. Sweep whatever exists once the run loop is up.
+     */
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        for (NSWindow *w in [NSApp windows]) {
+            hide_traffic_lights(w);
+        }
+        log_line("[nomin] traffic light sweep done (%lu windows)",
+                 (unsigned long)[NSApp windows].count);
+    });
 }
