@@ -1,6 +1,8 @@
-# spotify-resizer
+# spicetify-resize
 
 Remove Spotify's hard-coded **800×600** window minimum on macOS, so the window can be dragged down to a narrow vertical panel — a third of a 1440px display, a sidebar, an always-visible strip.
+
+> The name is a nod to the Spicetify crowd this is aimed at, but this is **not** a Spicetify extension — it can't be. See [why](#why-this-is-not-a-spicetify-extension). The CSS half *is* a Spicetify snippet.
 
 ```
 before                          after
@@ -89,8 +91,8 @@ What works is a **launch shim inside the bundle**: a small script next to the re
 Requires macOS and Xcode command line tools (`xcode-select --install`).
 
 ```sh
-git clone https://github.com/gliddd4/spotify-resizer
-cd spotify-resizer
+git clone https://github.com/gliddd4/spicetify-resize
+cd spicetify-resize
 sh scripts/install.sh
 ```
 
