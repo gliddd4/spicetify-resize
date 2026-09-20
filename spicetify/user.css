@@ -1,0 +1,67 @@
+/* ===========================================================================
+ * spotify-resizer — CSS companion
+ * ---------------------------------------------------------------------------
+ * This is the half of the fix that lives in the web layer, and the only half
+ * that can ship as a Spicetify snippet.
+ *
+ * Spotify hard-codes minimum widths that stop its layout reflowing. Removing
+ * them lets the UI collapse and clip gracefully at any window size instead of
+ * refusing to shrink. It does NOT make the window resizable on its own — the
+ * window's 800x600 floor is native and needs the injected library. This snippet
+ * is what makes the window look right once it is allowed to be narrow.
+ *
+ * Install as a Spicetify theme: drop this file at
+ *   ~/.config/spicetify/Themes/<name>/user.css
+ * with `inject_css = 1` in config-xpui.ini, then `spicetify apply`.
+ * =========================================================================== */
+
+/* The two rules that matter. Measured document minimum width with a simulated
+ * viewport:
+ *
+ *   no override                                       800px  (from body)
+ *   body { min-width: 0 }                             628px  (now-playing bar)
+ *   body + .main-nowPlayingBar-container { min-width: 0 }   536px
+ *
+ * The now-playing bar is the binding constraint once body is neutralised, so
+ * both are needed.
+ */
+body,
+.main-nowPlayingBar-container {
+  min-width: 0 !important;
+}
+
+/* min-height is left alone. 600px is a floor in the native window too, so
+ * overriding it here achieves nothing. */
+
+/* ---------------------------------------------------------------------------
+ * Narrow-window tidy-up.
+ *
+ * Below roughly 600px Spotify's chrome starts fighting for space. These rules
+ * collapse the parts that cannot usefully fit rather than letting them clip.
+ * Remove any of them if you disagree with a choice.
+ * ------------------------------------------------------------------------- */
+
+@media (max-width: 620px) {
+  /* Search is the widest fixed-width element in the top bar and the first
+   * thing to overflow. The keyboard shortcut still works. */
+  .main-globalNav-searchSection {
+    display: none !important;
+  }
+
+  /* Left nav collapses to icons. Spotify already does this at its own
+   * breakpoints; this just moves the threshold up. */
+  .Root__nav-bar {
+    width: 72px !important;
+  }
+  .Root__nav-bar .main-yourLibraryX-navLink .ellipsis-one-line {
+    display: none !important;
+  }
+}
+
+/* At full-panel widths the now-playing bar's centre block is the thing that
+ * overflows. Let it shrink and clip instead of pushing the layout wider. */
+.main-nowPlayingBar-center,
+.main-nowPlayingBar-left,
+.main-nowPlayingBar-right {
+  min-width: 0 !important;
+}
