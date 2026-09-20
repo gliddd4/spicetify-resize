@@ -18,15 +18,18 @@ before                          after
 
 ```
 src/nomin.m              the injected library — four NSWindow swizzles
-scripts/build.sh         compile + ad-hoc sign it
-scripts/install.sh       install the library and the launch shim
+src/launcher.c           the launcher — compiled, not a script, so it can be signed
+scripts/build.sh         compile + ad-hoc sign both
+scripts/install.sh       install the library and build the launcher app
 scripts/status.sh        check whether the patch is currently in effect
-scripts/uninstall.sh     restore Spotify to stock
+scripts/uninstall.sh     remove it
 scripts/launch-debug.sh  launch with debug logging and a CDP port
 scripts/block-updates.sh stop Spotify replacing its own bundle
 scripts/allow-updates.sh undo that
 spicetify/user.css       the CSS half, installable as a Spicetify theme
 ```
+
+**Spotify.app is never modified.**
 
 ## The problem
 
@@ -84,7 +87,26 @@ Getting the variable in place is the fiddly part. These were tried and rejected:
 - **`launchctl setenv`** — global, would inject into every GUI app.
 - **A separate launcher `.app`** — works, but macOS gives it its own Dock tile, so you end up with two Spotify icons while it runs.
 
-What works is a **launch shim inside the bundle**: a small script next to the real binary, with `CFBundleExecutable` repointed at it. One icon, works from the Dock, Spotlight, anywhere.
+What works is a **launch shim inside the bundle**: a small executable next to the real binary, with `CFBundleExecutable` repointed at it. One icon, works from the Dock, Spotlight, anywhere.
+
+### Why not a `CFBundleExecutable` shim — it gets Spotify killed
+
+The obvious delivery is to drop a launcher inside Spotify.app and repoint `CFBundleExecutable` at it. That is what this project did first, and it is a trap. It breaks Spotify's code-signature seal, and macOS kills the process at launch:
+
+```
+procPath:    /Applications/Spotify.app/Contents/MacOS/SpotifyLauncher
+parentProc:  launchd
+signal:      SIGKILL (Code Signature Invalid)
+termination: CODESIGNING - "Taskgated Invalid Signature"
+codeSigningID: ""      codeSigningTeamID: ""
+crashed at _dyld_start, before anything ran
+```
+
+Four crashes, all `parentProc: launchd`. The nastiest part is that **`open -a` passes**: the shim launched fine for hours under manual testing, then died on launchd-initiated launches — one of them at `uptime: 59s`, i.e. straight after boot. A test you can run is not a test for this.
+
+Compiling and ad-hoc signing the shim did **not** fix it. The problem is the bundle seal, not the executable's own signature. So Spotify.app is left alone and the launcher lives outside it.
+
+The launcher is compiled rather than a shell script for a related reason: a script cannot carry a code signature at all, so the process has no signing identity whatsoever.
 
 ## Install
 
@@ -96,11 +118,18 @@ cd spicetify-resize
 sh scripts/install.sh
 ```
 
-Then restart Spotify:
+Then quit Spotify and reopen it **from the launcher**:
 
 ```sh
-osascript -e 'quit app "Spotify"' && sleep 2 && open -a Spotify
+osascript -e 'quit app "Spotify"'
+open -a "$HOME/Applications/Spotify Resizable.app"
 ```
+
+### One Dock icon, not two
+
+The launcher is its own app, so if you keep the old Spotify icon in the Dock you will see two Spotify logos while it runs. Drag `~/Applications/Spotify Resizable.app` into the Dock and **remove the existing Spotify icon** — then launch Spotify through the launcher every time.
+
+Opening `/Applications/Spotify.app` directly still works, it just runs stock at 800×600.
 
 If you downloaded this as a zip, clear the quarantine flag first — macOS will otherwise let dyld refuse the library, and you'll get a normal, unresizable Spotify with no error:
 
@@ -180,6 +209,31 @@ This is mechanism-based, not vendor-supported. It's been verified to leave Spoti
 
 Trade-off worth stating plainly: blocking updates means no security fixes. The alternative is to leave updates on and re-run `install.sh` after each one.
 
+## If Spotify won't start
+
+With this design Spotify.app is untouched, so a failure to launch is almost always the launcher or the library, not Spotify. Open `/Applications/Spotify.app` directly — if that works, the problem is here, not with Spotify.
+
+```sh
+sh scripts/status.sh           # what's actually installed
+sh scripts/uninstall.sh        # remove it, then Spotify.app runs stock
+```
+
+Or remove the pieces by hand:
+
+```sh
+rm -rf "$HOME/Applications/Spotify Resizable.app" ~/.spotify-resizer
+```
+
+If you upgraded from an earlier version that used the in-bundle shim, check for it and clear it:
+
+```sh
+grep -l "Taskgated Invalid Signature" ~/Library/Logs/DiagnosticReports/Spotify-*.ips
+/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" /Applications/Spotify.app/Contents/Info.plist
+# if that prints anything other than "Spotify":
+rm -f /Applications/Spotify.app/Contents/MacOS/SpotifyLauncher
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable Spotify" /Applications/Spotify.app/Contents/Info.plist
+```
+
 ## Checking whether the patch survived
 
 ```sh
@@ -201,7 +255,8 @@ Patch is installed. Restart Spotify if the running process has no helper.
 ## Caveats
 
 - **Spotify updates undo this.** An update replaces the bundle, so the shim disappears and the window goes back to 800×600. The failure is silent — Spotify keeps working, it just stops resizing. Either re-run `install.sh` after updating, or block updates with `block-updates.sh`.
-- **The code signature is not restorable byte-for-byte.** Editing and re-signing a bundle rewrites it, so `codesign --verify` will complain afterwards. Spotify runs normally, and a Spotify update or reinstall restores the original signature.
+- **You must launch Spotify through the launcher.** Opening Spotify.app directly gives you a normal, unresizable 800×600 window. There is no way around this without editing Spotify's bundle, which is exactly what gets it killed — see above.
+- **One pre-existing signature caveat.** If you have an install predating this design, an earlier experiment re-signed Spotify's bundled Chromium Embedded Framework ad-hoc, and that original signature is not restorable byte-for-byte. `codesign --verify` will complain; Spotify runs normally, and reinstalling Spotify restores it. The current design does not touch Spotify.app at all.
 - **macOS only.** Windows and Linux enforce this somewhere entirely different; there is no shared fix.
 - **Mac App Store builds are not supported.** `install.sh` detects and refuses them.
 - **Not notarizable.** You cannot notarize a library whose purpose is injecting into another vendor's app, so distribution will always require the quarantine step.

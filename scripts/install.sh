@@ -2,15 +2,20 @@
 #
 # install.sh — make Spotify's window freely resizable.
 #
-# What it does, in order:
-#   1. locates Spotify and refuses to touch a Mac App Store build
-#   2. installs the injected library to ~/.spotify-resizer/
-#   3. backs up Spotify's Info.plist
-#   4. drops a small launch shim next to the real Spotify binary
-#   5. repoints CFBundleExecutable at the shim
+# Spotify.app is NOT modified. This installs the injected library and builds a
+# small launcher app that starts Spotify with that library loaded.
 #
-# The real Spotify binary is never modified. Re-running this after a Spotify
-# update is safe and is the intended way to re-apply the fix.
+# Why a launcher app rather than editing Spotify: the obvious approach is to
+# drop a shim inside Spotify.app and point CFBundleExecutable at it. That breaks
+# Spotify's code signature seal, and macOS kills the process:
+#
+#   signal:      SIGKILL (Code Signature Invalid)
+#   termination: CODESIGNING - "Taskgated Invalid Signature"
+#   parentProc:  launchd
+#
+# It survives `open -a` testing and then dies on launchd-initiated launches,
+# which is the worst possible failure: silent during testing, fatal at boot.
+# A separate, self-consistent, signed bundle avoids it entirely.
 #
 # Usage:  sh scripts/install.sh [path/to/Spotify.app]
 
@@ -18,16 +23,14 @@ set -eu
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 LIB_SRC="$REPO_ROOT/dist/libnomin.dylib"
+LAUNCH_SRC="$REPO_ROOT/dist/SpotifyResizable"
 INSTALL_DIR="$HOME/.spotify-resizer"
 LIB_DST="$INSTALL_DIR/libnomin.dylib"
-SHIM_NAME="SpotifyLauncher"
-PLIST_BACKUP="$INSTALL_DIR/Info.plist.orig"
+APP_DEST="$HOME/Applications/Spotify Resizable.app"
+APP_EXEC_NAME="SpotifyResizable"
+ICON_NAME="AppIcon"
 
 SPOTIFY_APP="${1:-/Applications/Spotify.app}"
-PLIST="$SPOTIFY_APP/Contents/Info.plist"
-MACOS_DIR="$SPOTIFY_APP/Contents/MacOS"
-REAL_BIN_NAME="Spotify"
-SHIM="$MACOS_DIR/$SHIM_NAME"
 
 say()  { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -46,30 +49,11 @@ Spicetify and this tool cannot patch MAS builds. Reinstall Spotify from
 https://www.spotify.com/download and run this again."
 fi
 
-[ -f "$PLIST" ] || fail "no Info.plist at $PLIST"
-[ -f "$MACOS_DIR/$REAL_BIN_NAME" ] || fail "no $REAL_BIN_NAME binary in $MACOS_DIR"
+[ -x "$SPOTIFY_APP/Contents/MacOS/Spotify" ] || fail "no Spotify binary in $SPOTIFY_APP/Contents/MacOS"
 
-if [ ! -f "$LIB_SRC" ]; then
-	say "dist/libnomin.dylib not found — building it first."
+if [ ! -f "$LIB_SRC" ] || [ ! -f "$LAUNCH_SRC" ]; then
+	say "build artifacts missing — building first."
 	sh "$REPO_ROOT/scripts/build.sh" || fail "build failed"
-fi
-
-# ------------------------------------------------------- already-installed?
-
-current_exec=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PLIST" 2>/dev/null || echo "")
-if [ "$current_exec" = "$SHIM_NAME" ]; then
-	say "Already installed (CFBundleExecutable is $SHIM_NAME). Refreshing the library."
-else
-	say "CFBundleExecutable is '$current_exec' — proceeding."
-fi
-
-# ---------------------------------------------------------------- warn if open
-
-if pgrep -f "^$SPOTIFY_APP/Contents/MacOS/$REAL_BIN_NAME( |\$)" >/dev/null 2>&1; then
-	say ""
-	say "NOTE: Spotify is running. Quit it and reopen before the change takes effect."
-	say "      osascript -e 'quit app \"Spotify\"'"
-	say ""
 fi
 
 # --------------------------------------------------------- install the library
@@ -88,74 +72,83 @@ xattr -d com.apple.quarantine "$LIB_DST" 2>/dev/null || true
 
 say "installed library: $LIB_DST"
 
-# ------------------------------------------------------------- back up the plist
+# ----------------------------------------------------- build the launcher .app
 
-# Only ever capture a PRISTINE plist. If we are re-installing over an existing
-# patch, CFBundleExecutable already says SpotifyLauncher — backing that up would
-# make uninstall "restore" the patch.
-if [ -f "$PLIST_BACKUP" ]; then
-	say "plist backup kept: $PLIST_BACKUP (already existed)"
-elif [ "$current_exec" = "$REAL_BIN_NAME" ]; then
-	cp "$PLIST" "$PLIST_BACKUP"
-	say "backed up plist  : $PLIST_BACKUP"
+say "building launcher: $APP_DEST"
+
+rm -rf "$APP_DEST"
+mkdir -p "$APP_DEST/Contents/MacOS" "$APP_DEST/Contents/Resources"
+
+cp "$LAUNCH_SRC" "$APP_DEST/Contents/MacOS/$APP_EXEC_NAME"
+chmod 755 "$APP_DEST/Contents/MacOS/$APP_EXEC_NAME"
+
+# Use Spotify's own icon so the launcher is recognisable in the Dock.
+if [ -f "$SPOTIFY_APP/Contents/Resources/AppIcon.icns" ]; then
+	cp "$SPOTIFY_APP/Contents/Resources/AppIcon.icns" "$APP_DEST/Contents/Resources/$ICON_NAME.icns"
+fi
+
+cat > "$APP_DEST/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Spotify Resizable</string>
+	<key>CFBundleExecutable</key>
+	<string>$APP_EXEC_NAME</string>
+	<key>CFBundleIconFile</key>
+	<string>$ICON_NAME</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.spotify.resizable</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Spotify Resizable</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>10.15</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
+PLIST
+
+# Sign the whole bundle. Without this, taskgated rejects it the same way it
+# rejected the in-bundle shim.
+codesign --force --sign - "$APP_DEST" || say "WARNING: codesign failed — the launcher may be killed at launch"
+
+if codesign -dv "$APP_DEST" 2>&1 | grep -q "Signature=adhoc"; then
+	say "launcher signed : yes (ad-hoc)"
 else
-	say "WARNING: Info.plist is already modified (CFBundleExecutable = '$current_exec')"
-	say "         and no pristine backup exists. Uninstall will set the key back"
-	say "         in place rather than restoring a byte-exact file."
+	say "WARNING: launcher has NO signature. macOS will likely kill it at launch."
 fi
 
-# ------------------------------------------------------------------- the shim
-
-# Written with a quoted heredoc so nothing here is expanded at install time.
-cat > "$SHIM" <<SHIM_EOF
-#!/bin/sh
-#
-# $SHIM_NAME — generated by spotify-resizer. Do not edit.
-#
-# Loads the window-minimum-size helper and hands over to the real Spotify
-# binary, which sits untouched next to this file as "$REAL_BIN_NAME".
-# Remove this file and set CFBundleExecutable back to "$REAL_BIN_NAME" to undo,
-# or just run scripts/uninstall.sh.
-
-set -u
-
-LIB="$LIB_DST"
-REAL="\$(cd "\$(dirname "\$0")" && pwd)/$REAL_BIN_NAME"
-
-# If the library is missing, still start Spotify. A missing file must never
-# leave the user with an app that will not open.
-if [ -f "\$LIB" ]; then
-	DYLD_INSERT_LIBRARIES="\$LIB"
-	export DYLD_INSERT_LIBRARIES
-fi
-
-exec "\$REAL" "\$@"
-SHIM_EOF
-
-chmod +x "$SHIM"
-say "installed shim   : $SHIM"
-
-# ---------------------------------------------------------- repoint the bundle
-
-/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $SHIM_NAME" "$PLIST"
-say "CFBundleExecutable -> $SHIM_NAME"
-
-# LaunchServices caches the bundle metadata. Without this it keeps serving the
-# old plist and Spotify launches without the shim.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 if [ -x "$LSREGISTER" ]; then
-	"$LSREGISTER" -f "$SPOTIFY_APP" || true
+	"$LSREGISTER" -f "$APP_DEST" || true
 	say "re-registered with LaunchServices"
 fi
 
 # ---------------------------------------------------------------------- done
 
 say ""
-say "Done. Restart Spotify:"
-say "  osascript -e 'quit app \"Spotify\"' && sleep 2 && open -a Spotify"
+say "Done. Spotify.app was not modified."
 say ""
-say "Verify the library loaded:"
-say "  lsof -p \$(pgrep -f '^$SPOTIFY_APP/Contents/MacOS/$REAL_BIN_NAME( |\$)' | head -1) | grep libnomin"
+say "IMPORTANT - avoid a second Dock icon:"
+say "  Drag '$APP_DEST' into your Dock and REMOVE the existing Spotify icon."
+say "  Launch Spotify through this app, not through Spotify.app directly."
 say ""
-say "Then drag the window edge — it will now go below 800px."
-say "Note: Spotify updates replace the bundle and undo this. Re-run install.sh after updating."
+say "Verify:"
+say "  sh scripts/status.sh"
+say ""
+say "Note: Spotify updates replace the bundle and undo this. Re-run install.sh"
+say "after updating, or run scripts/block-updates.sh to stop them."
